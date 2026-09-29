@@ -8,6 +8,7 @@ export default function Navbar() {
         <Link href="/">Menu</Link>
         <Link href="/cart">Cart</Link>
         <Link href="/checkout">Checkout</Link>
+        <Link href="/orders">Orders</Link>
         <Link href="/admin">Admin</Link>
       </span>
     </nav>

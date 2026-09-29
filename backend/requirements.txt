@@ -1,7 +1,16 @@
+# Installed and used today. Keep this list minimal: every unused dependency is
+# extra attack surface, and pip-audit only covers what is actually installed.
 fastapi>=0.110
 uvicorn[standard]>=0.29
-psycopg[binary]>=3.1
 pydantic>=2
-python-jose[cryptography]
-passlib[bcrypt]
-python-multipart
+
+# --- Deliberately NOT included ---
+# Password hashing uses hashlib.scrypt from the standard library
+# (see app/security.py), so passlib/bcrypt are not needed.
+#
+# psycopg[binary]        - add when the database is connected (blocked on the
+#                          Railway public DATABASE_URL)
+# python-multipart       - add with the first file-upload endpoint
+# a JWT library          - add with the first authenticated route. Do NOT reach
+#                          for python-jose; it has a history of published
+#                          advisories. Prefer PyJWT, pin it, and re-run pip-audit.

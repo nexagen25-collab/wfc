@@ -41,6 +41,22 @@ jobs:
       - name: Upload + OTP abuse tests
         run: python -m tests.test_uploads_otp
 
+      - name: Token forgery + payment webhook tests
+        run: python -m tests.test_tokens_payments
+
+      - name: Dependency audit
+        run: pip-audit --progress-spinner off
+
+      - name: Fails if a known-vulnerable JWT library is pinned
+        # PyJWT 2.10.1 and earlier carry PYSEC-2026-176/177/178/179.
+        run: |
+          pinned=$(grep -i '^pyjwt' requirements.txt | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          echo "pinned PyJWT: $pinned"
+          case "$pinned" in
+            2.1[3-9].*|2.[2-9][0-9].*|[3-9].*) echo "guardrail holds" ;;
+            *) echo "::error::PyJWT $pinned is below 2.13.0 and has known advisories"; exit 1 ;;
+          esac
+
       - name: Pricing and menu-drift tests
         # Also parses frontend/lib/menu.ts, so a price edited in one place but
         # not the other fails the build.
@@ -48,9 +64,6 @@ jobs:
 
       - name: Import check
         run: python -c "import app.main"
-
-      - name: Dependency audit
-        run: pip-audit --progress-spinner off
 
       - name: Fails if production can boot without a real secret
         run: |

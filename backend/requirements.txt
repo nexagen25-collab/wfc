@@ -3,6 +3,7 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
 pydantic>=2
+PyJWT==2.13.0
 
 # --- Deliberately NOT included ---
 # Password hashing uses hashlib.scrypt from the standard library
@@ -11,6 +12,11 @@ pydantic>=2
 # psycopg[binary]        - add when the database is connected (blocked on the
 #                          Railway public DATABASE_URL)
 # python-multipart       - add with the first file-upload endpoint
-# a JWT library          - add with the first authenticated route. Do NOT reach
-#                          for python-jose; it has a history of published
-#                          advisories. Prefer PyJWT, pin it, and re-run pip-audit.
+#
+# Installed and pinned:
+# PyJWT 2.13.0           - session tokens in app/tokens.py. Do NOT downgrade and
+#                          do NOT swap for python-jose. 2.10.1 was installed
+#                          first and pip-audit reported four advisories against
+#                          it (PYSEC-2026-176/177/178/179, fixed in 2.12.1 and
+#                          2.13.0). Pin the version and re-run pip-audit on
+#                          every upgrade; "latest" is not a version.

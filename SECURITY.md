@@ -49,8 +49,12 @@ protected, what is **not**, and what must happen before real money is involved.
 | Only the three approved roles can be issued or accepted | `backend/app/tokens.py`, `app/auth_deps.py` | `superadmin`, list-typed role, unknown role refused |
 | Production refuses to boot on a missing or short signing secret | `backend/app/config.py` | 3 CI guardrail cases (placeholder, 31 chars, 32 chars) |
 | Exception headers survive our custom error handler | `backend/app/main.py` | `Retry-After` / `X-Teapot` preservation test |
+| `/auth/` routes get 5/3/10 per 5 min instead of 120/min, on separate buckets | `backend/app/rate_limit.py` | 74/74 rate tests |
+| A strict limit cannot be loosened or disabled by an environment variable | `backend/app/rate_limit.py` | env 999999 clamped to 5; env 0 and -5 clamped to 1 |
+| Concurrent password hashing capped; over-capacity refused, never queued | `backend/app/rate_limit.py` | 24 threads, peak held at 4/4, 13307 refusals |
+| An `/auth/` route with no strict limit stops the app from starting | `backend/app/auth_deps.py` | startup check fires on `/auth/refresh`, proven able to fail |
 
-Run all six attack suites:
+Run all seven attack suites:
 
 ```bash
 cd backend
@@ -60,6 +64,7 @@ cd backend
 .\.venv\Scripts\python.exe -m tests.test_pricing
 .\.venv\Scripts\python.exe -m tests.test_tokens_payments
 .\.venv\Scripts\python.exe -m tests.test_auth_redaction
+.\.venv\Scripts\python.exe -m tests.test_rate_guard
 ```
 
 They also run automatically on every push via `.github/workflows/security.yml`,
@@ -104,14 +109,16 @@ along with the dependency audits and two guardrail assertions.
     This weakens the policy and is a known limitation.
 13. **Tokens get 30 seconds of extra life** past `exp`, the clock-drift leeway.
     Deliberate, small, and named in the tests so nobody "fixes" it by accident.
-14. **Login is a CPU-exhaustion amplifier.** scrypt costs a measured 196 ms of
-    CPU per password check, which is the point — it is what makes stolen hashes
-    expensive to crack. But it also means each login attempt is ~3,500 times
-    more expensive than an authenticated request. At 120 requests/minute/IP, one
-    IP can force ~23 CPU-seconds per minute, and per-process limiting does
-    nothing against an attacker spreading attempts across IPs. Needs a much
-    tighter limit on login and OTP-verify specifically. **Not implemented: it
-    changes customer-facing behaviour, so it is a decision for the owner.**
+14. **Login CPU exhaustion: mitigated, not closed.** scrypt costs a measured
+    196 ms of CPU per password check, which is the point — it is what makes
+    stolen hashes expensive to crack. It also means each login attempt is
+    ~3,500 times an authenticated request. The general 120/min/IP budget would
+    have let one address force ~23 CPU-seconds per minute, so `/auth/login`,
+    `/auth/otp/request` and `/auth/otp/verify` now have their own 5/3/10 per
+    5-minute budgets on separate buckets, and `PASSWORD_HASH_GUARD` caps
+    concurrent hashes at 4 per process. **No route uses any of this yet**, and
+    both mechanisms are per-process: with N instances the effective limit is N
+    times what is written here. Move both to Redis before scaling out.
 15. **Log redaction is pattern matching, not a guarantee.** A key name with no
     `:` or `=` after it is not caught (`api-key ABC123` in bare prose), a secret
     split across two log lines is not caught, and it is O(log line length) at
@@ -241,5 +248,8 @@ believing it, and lift the limit for the run.
 13. Do not log request bodies, payloads or long database error strings. Redaction
     is O(size) at ~420 us/KB and would become the most expensive part of a
     request.
-14. Re-run the six attack suites and `npm audit` / `pip-audit` before every
+14. **Wrap every password hash in `PASSWORD_HASH_GUARD.slot()`.** It refuses
+    immediately when the process is already at capacity; do not add a queue or
+    a retry loop around it.
+15. Re-run the seven attack suites and `npm audit` / `pip-audit` before every
     release. They are in CI, but CI is not a substitute for reading them.

@@ -51,6 +51,11 @@ jobs:
         # that always passes cannot masquerade as a guard.
         run: python -m tests.test_auth_redaction
 
+      - name: Rate limit + load shedding tests
+        # Also proves the concurrency cap holds under 24 real threads and that
+        # a strict limit cannot be loosened or switched off by an env var.
+        run: python -m tests.test_rate_guard
+
       - name: Dependency audit
         run: pip-audit --progress-spinner off
 
@@ -70,9 +75,11 @@ jobs:
         run: python -m tests.test_pricing
 
       - name: Import check
-        # This also runs enforce_route_protection(). If a route is ever added
-        # without an auth dependency and without an allowlist entry, the import
-        # raises and this step fails. Forgetting auth is a build break.
+        # This also runs enforce_route_protection() AND
+        # enforce_strict_rate_limits(). If a route is ever added without an auth
+        # dependency and without an allowlist entry, or an /auth/ route is
+        # added without a strict rate limit, the import raises and this step
+        # fails. Forgetting either is a build break, not a production hole.
         run: python -c "import app.main"
 
       - name: Fails if production can boot without a real secret

@@ -19,6 +19,26 @@ ALLOWED_HOSTS = [
 RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "120"))
 RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
 
+# Strict per-route budgets for the routes that are cheap to spam and expensive
+# for us to answer. A password check costs a measured 196 ms of scrypt CPU, so
+# login is ~3,500 times more expensive than an ordinary authenticated request
+# and the general 120/min budget is far too generous for it.
+#
+# These values may only ever be LOWERED by an environment variable. The hard
+# ceilings live in app/rate_limit.py as STRICT_LIMITS and are enforced with
+# min(), so a careless or compromised deploy cannot switch login throttling off
+# by setting a large number here.
+RATE_LIMIT_LOGIN_REQUESTS = int(os.getenv("RATE_LIMIT_LOGIN_REQUESTS", "5"))
+RATE_LIMIT_OTP_REQUEST = int(os.getenv("RATE_LIMIT_OTP_REQUEST", "3"))
+RATE_LIMIT_OTP_VERIFY = int(os.getenv("RATE_LIMIT_OTP_VERIFY", "10"))
+
+# Ceiling on how many password hashes may run at the same time in this process.
+# Per-IP limits cannot stop an attacker who spreads requests across many source
+# addresses, so this caps total in-flight expensive work regardless of where the
+# requests came from. Also per-process; move to Redis when we run more than one
+# instance.
+PASSWORD_HASH_CONCURRENCY = int(os.getenv("PASSWORD_HASH_CONCURRENCY", "4"))
+
 # Reject oversized request bodies early, before any parsing work happens.
 MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", str(1024 * 1024)))
 

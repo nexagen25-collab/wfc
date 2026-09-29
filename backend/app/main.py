@@ -10,6 +10,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import config
 from .auth_deps import (
     enforce_route_protection,
+    enforce_strict_rate_limits,
     get_current_user,
     require_admin,
 )
@@ -143,3 +144,7 @@ async def admin_ping(claims: Claims = Depends(require_admin)):
 # This runs on every startup and in CI, so forgetting auth on a new endpoint is
 # a crash on the developer's machine rather than a hole in production.
 enforce_route_protection(app)
+
+# Second startup guard: an /auth/ route with no strict rate limit would let one
+# address spend ~23 CPU-seconds per minute on scrypt, so it is refused here too.
+enforce_strict_rate_limits(app)

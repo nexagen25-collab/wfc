@@ -29,6 +29,7 @@ from fastapi import Depends, Header, HTTPException, status
 from fastapi.routing import APIRoute
 
 from .tokens import ROLES, Claims, TokenError, verify_token
+from .rate_limit import strict_limit_for
 
 # Marker attribute read by the route auditor. Set on every dependency that
 # authenticates. Use an attribute rather than a name so a factory-created
@@ -183,4 +184,44 @@ def enforce_route_protection(app) -> None:
             + ". Add an auth dependency (Depends(get_current_user) or "
             "Depends(require_...)) or list the route in PUBLIC_ROUTES with a "
             "reason. See app/auth_deps.py."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Deny by default, part two: no authentication route may exist without a strict
+# rate limit. Password hashing costs a measured 196 ms of CPU, so an /auth/
+# route with only the general 120/min budget is a denial of service with a 200
+# at the end of it.
+#
+# Vacuous today, because no /auth/ route exists yet. It is written now so that
+# the login route cannot be added without the limit, and so the tests can prove
+# the check actually fires rather than assuming it will.
+AUTH_PATH_PREFIX = "/auth/"
+
+
+def unthrottled_auth_routes(app) -> list[str]:
+    """Auth routes that would inherit the general rate limit."""
+    problems: list[str] = []
+    for route in app.routes:
+        path = getattr(route, "path", None)
+        if not isinstance(path, str):
+            continue
+        if not (path == AUTH_PATH_PREFIX.rstrip("/") or path.startswith(AUTH_PATH_PREFIX)):
+            continue
+        if strict_limit_for(path) is None:
+            problems.append(path)
+    return problems
+
+
+def enforce_strict_rate_limits(app) -> None:
+    """Fail loudly at startup if an auth route has no strict rate limit."""
+    problems = unthrottled_auth_routes(app)
+    if problems:
+        raise RouteProtectionError(
+            "These authentication routes have no strict rate limit: "
+            + ", ".join(sorted(problems))
+            + ". A password check costs ~196 ms of CPU, so an unthrottled "
+            "/auth/ route is a denial of service. Add the path to STRICT_LIMITS "
+            "in app/rate_limit.py and wrap password hashing in "
+            "PASSWORD_HASH_GUARD.slot(). See app/rate_limit.py."
         )

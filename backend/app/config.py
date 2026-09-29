@@ -24,8 +24,23 @@ MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", str(1024 * 1024)))
 
 # Secrets are required in production. In development we allow a clearly-fake
 # placeholder so the app boots, but it must never be used to protect real data.
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-only-insecure-placeholder")
+#
+# The placeholder is deliberately longer than 32 characters. app/tokens.py
+# refuses to sign with a secret under 32 characters (HS256 wants 256 bits of
+# entropy), so a shorter placeholder would make token issuing fail in
+# development and tempt someone to "fix" it by loosening that check.
+DEV_PLACEHOLDER_SECRET = "dev-only-insecure-placeholder-do-not-use-in-production"
+JWT_SECRET = os.getenv("JWT_SECRET", DEV_PLACEHOLDER_SECRET)
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development") == "production"
 
-if IS_PRODUCTION and JWT_SECRET == "dev-only-insecure-placeholder":
+# Minimum length enforced on both sides: refusing at boot in production and at
+# sign/verify time in app/tokens.py. Two independent guards, not one.
+MIN_SECRET_LENGTH = 32
+
+if IS_PRODUCTION and JWT_SECRET == DEV_PLACEHOLDER_SECRET:
     raise RuntimeError("JWT_SECRET must be set to a strong random value in production.")
+
+if IS_PRODUCTION and len(JWT_SECRET) < MIN_SECRET_LENGTH:
+    raise RuntimeError(
+        f"JWT_SECRET must be at least {MIN_SECRET_LENGTH} characters in production."
+    )

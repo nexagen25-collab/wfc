@@ -27,9 +27,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install
+        # requirements-dev.txt pulls in requirements.txt plus test-only tools.
+        # The runtime list stays separate and minimal on purpose.
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pip-audit
+          pip install -r requirements-dev.txt
 
       - name: Validation-layer attack tests
         run: python -m tests.test_security
@@ -43,6 +45,11 @@ jobs:
 
       - name: Token forgery + payment webhook tests
         run: python -m tests.test_tokens_payments
+
+      - name: Log redaction + route-protection tests
+        # Includes proof that the route auditor can actually fail, so a guard
+        # that always passes cannot masquerade as a guard.
+        run: python -m tests.test_auth_redaction
 
       - name: Dependency audit
         run: pip-audit --progress-spinner off
@@ -63,6 +70,9 @@ jobs:
         run: python -m tests.test_pricing
 
       - name: Import check
+        # This also runs enforce_route_protection(). If a route is ever added
+        # without an auth dependency and without an allowlist entry, the import
+        # raises and this step fails. Forgetting auth is a build break.
         run: python -c "import app.main"
 
       - name: Fails if production can boot without a real secret
@@ -72,6 +82,17 @@ jobs:
             exit 1
           fi
           echo "guardrail holds: production refuses the placeholder secret"
+
+      - name: Fails if production accepts a weak secret
+        # 31 characters: long enough to look deliberate, short enough to be
+        # brute-forced. app/config.py must refuse to boot in production.
+        run: |
+          if ENVIRONMENT=production JWT_SECRET="$(printf 'x%.0s' {1..31})" \
+             python -c "import app.config" 2>/dev/null; then
+            echo "::error::production booted with a JWT secret under 32 characters"
+            exit 1
+          fi
+          echo "guardrail holds: production refuses a secret under 32 characters"
 
   frontend:
     name: frontend audit + build

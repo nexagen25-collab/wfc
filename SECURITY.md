@@ -43,8 +43,14 @@ protected, what is **not**, and what must happen before real money is involved.
 | Admin and Staff mocks fail closed in production builds | `frontend/components/MockGate.tsx` | production build HTML |
 | No secrets in git | `.gitignore` | tracked-file scan |
 | Known dependency CVEs | both | `npm audit` 0, `pip-audit` none |
+| Passwords, JWTs, OTPs, signatures, DB URLs and phones scrubbed from logs | `backend/app/logging_redaction.py` | 114/114 redaction tests, incl. secrets in exception tracebacks |
+| A route with no auth dependency stops the app from starting | `backend/app/auth_deps.py` | detector proven able to fail on GET/POST/PUT/PATCH/DELETE and on a plain `Route` |
+| Every 401 response is byte-identical across all failure modes | `backend/app/auth_deps.py` | 7 forgery modes compared |
+| Only the three approved roles can be issued or accepted | `backend/app/tokens.py`, `app/auth_deps.py` | `superadmin`, list-typed role, unknown role refused |
+| Production refuses to boot on a missing or short signing secret | `backend/app/config.py` | 3 CI guardrail cases (placeholder, 31 chars, 32 chars) |
+| Exception headers survive our custom error handler | `backend/app/main.py` | `Retry-After` / `X-Teapot` preservation test |
 
-Run all three attack suites:
+Run all six attack suites:
 
 ```bash
 cd backend
@@ -53,6 +59,7 @@ cd backend
 .\.venv\Scripts\python.exe -m tests.test_uploads_otp
 .\.venv\Scripts\python.exe -m tests.test_pricing
 .\.venv\Scripts\python.exe -m tests.test_tokens_payments
+.\.venv\Scripts\python.exe -m tests.test_auth_redaction
 ```
 
 They also run automatically on every push via `.github/workflows/security.yml`,
@@ -97,8 +104,20 @@ along with the dependency audits and two guardrail assertions.
     This weakens the policy and is a known limitation.
 13. **Tokens get 30 seconds of extra life** past `exp`, the clock-drift leeway.
     Deliberate, small, and named in the tests so nobody "fixes" it by accident.
-14. **No HTTPS locally, no penetration test, no security logging or alerting.**
-15. **Input validation is not a substitute for authorisation.**
+14. **Login is a CPU-exhaustion amplifier.** scrypt costs a measured 196 ms of
+    CPU per password check, which is the point — it is what makes stolen hashes
+    expensive to crack. But it also means each login attempt is ~3,500 times
+    more expensive than an authenticated request. At 120 requests/minute/IP, one
+    IP can force ~23 CPU-seconds per minute, and per-process limiting does
+    nothing against an attacker spreading attempts across IPs. Needs a much
+    tighter limit on login and OTP-verify specifically. **Not implemented: it
+    changes customer-facing behaviour, so it is a decision for the owner.**
+15. **Log redaction is pattern matching, not a guarantee.** A key name with no
+    `:` or `=` after it is not caught (`api-key ABC123` in bare prose), a secret
+    split across two log lines is not caught, and it is O(log line length) at
+    ~420 us/KB. It is a safety net behind rule 8, not a replacement for it.
+16. **No HTTPS locally, no penetration test, no security logging or alerting.**
+17. **Input validation is not a substitute for authorisation.**
 
 ## Threat model — who attacks this and how
 
@@ -124,6 +143,74 @@ along with the dependency audits and two guardrail assertions.
 be treated as compromised.** It was never written to a file in this repository.
 Rotate it in Railway before that database is connected to anything.
 
+## Performance budget — measured, not guessed
+
+Recorded 2026-09-29 on a Windows dev machine, Python 3.14, uvicorn single
+worker. These are here so that a future change which quietly makes a security
+control ten times more expensive is visible rather than discovered in
+production. They are measurements on one machine, not targets.
+
+| Control | Cost | When it runs |
+| --- | --- | --- |
+| `verify_token()` (signature + all claim checks) | ~55 us | every authenticated request |
+| `issue_token()` | ~34 us | login only |
+| scrypt `hash_password` / `verify_password` | **196 ms** | login only |
+| `redact()` typical log line | ~32 us | every log record |
+| `redact()` line containing a JWT | ~11 us | every log record |
+| `redact()` 1 KB log line | ~870 us | scales at ~420 us/KB |
+| webhook HMAC verify | ~7 us | per webhook |
+| `price_cart()` 20 items | ~39 us | per quote |
+| route protection audit | ~5 us | **once at startup** |
+
+End-to-end over localhost HTTP, position-rotated to remove ordering bias:
+
+| Request | p50 | p95 |
+| --- | --- | --- |
+| `GET /health` (public) | 2.61 ms | 5.10 ms |
+| `GET /me` no token -> 401 | 2.66 ms | 5.84 ms |
+| `GET /me` valid token -> 200 | 3.65 ms | 5.68 ms |
+| `GET /admin/ping` admin -> 200 | 3.72 ms | 5.85 ms |
+
+The full authenticated request costs about **1.0 ms more** than an
+unauthenticated one, and only ~55 us of that is token cryptography. The rest is
+FastAPI dependency resolution and the HTTP layer. Profiling 1000 authenticated
+requests (`cProfile`) shows the entire security stack — signature verification,
+claim validation, rate limiting, the security-headers middleware — accounting
+for under 0.01 ms per 1000 requests of cumulative time, while `solve_dependencies`
+and the sync-endpoint threadpool hop dominate. **The security controls are not
+the bottleneck and there is no case for weakening them on performance grounds.**
+
+Two consequences that are real constraints, not trivia:
+
+1. **scrypt is 196 ms of CPU per login attempt, by design.** That is the price
+   of making stolen password hashes expensive to crack, and it is worth paying.
+   It is also a CPU-exhaustion amplifier: at the current 120 requests/minute/IP
+   limit, one IP can force ~23 CPU-seconds per minute, and per-process
+   rate limiting does nothing against an attacker spreading attempts across IPs.
+   Mitigation is a much tighter limit on the login and OTP-verify routes
+   specifically, and eventually a global cap on concurrent password hashes.
+   **Not implemented — it changes customer-facing behaviour, so it is your call.**
+   Measured capacity: 5 hashes/sec on one thread, ~12/sec on four (scrypt
+   releases the GIL only partly).
+2. **`redact()` is O(log line length) at ~420 us/KB.** A 64 KB log line costs
+   26 ms. Today nothing logs request bodies and request bodies are capped at
+   1 MB, so exposure is low. Do not start logging raw bodies, payloads or large
+   database error strings: redaction would then cost more than the request.
+3. **`async def` vs `def` is worth 241 us per request** on these endpoints.
+   FastAPI runs a sync `def` endpoint in a threadpool. `/me` and `/admin/ping`
+   are `async def` because they only validate and do crypto. Keep that split.
+
+### A benchmarking trap worth knowing about
+
+A 429 from the rate limiter **short-circuits before token verification**, so a
+throttled request is *cheaper* than a served one. A benchmark that quietly trips
+the rate limit therefore measures the cheap path and will report the entire
+security stack as free. This happened during the measurements above: the first
+run showed authenticated routes appearing ~1 ms *faster* than `/health`, which
+was impossible, and the cause was the limiter returning 429 for everything after
+the first 120 requests. Always assert a 2xx in a latency harness before
+believing it, and lift the limit for the run.
+
 ## Rules for this codebase
 
 1. Never trust a client-supplied price, total, discount, role, or user id.
@@ -140,9 +227,19 @@ Rotate it in Railway before that database is connected to anything.
 7. Pass `algorithms=["HS256"]` to `jwt.decode` and keep the algorithm pinned in
    `app/tokens.py`. Dropping that argument reopens `alg:none`.
 8. Never log a password, token, OTP or webhook signature. They are credentials.
-6. Never use `Math.random()` for anything an attacker benefits from guessing.
+   `app/logging_redaction.py` is a safety net for the day that rule is broken,
+   not a reason to log them.
+9. Never use `Math.random()` for anything an attacker benefits from guessing.
    Tokens, OTPs and nonces come from `secrets` in `app/security.py`.
-7. Any file a user can upload goes through `app/uploads.py`. Never write an
-   upload using the name the client sent; use `ValidatedImage.safe_name`.
-9. Re-run the five attack suites and `npm audit` / `pip-audit` before every
-   release. They are in CI, but CI is not a substitute for reading them.
+10. Any file a user can upload goes through `app/uploads.py`. Never write an
+    upload using the name the client sent; use `ValidatedImage.safe_name`.
+11. **Every new route needs an auth dependency or a `PUBLIC_ROUTES` entry.**
+    `enforce_route_protection()` runs at import, so forgetting is a crash, not a
+    hole. Do not add to `PUBLIC_ROUTES` to make a test pass.
+12. `async def` for endpoints that only validate or do crypto. Plain `def` for
+    endpoints that block on I/O, so FastAPI runs them off the event loop.
+13. Do not log request bodies, payloads or long database error strings. Redaction
+    is O(size) at ~420 us/KB and would become the most expensive part of a
+    request.
+14. Re-run the six attack suites and `npm audit` / `pip-audit` before every
+    release. They are in CI, but CI is not a substitute for reading them.

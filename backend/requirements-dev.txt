@@ -1,0 +1,17 @@
+# Test-only dependencies. NOT installed in production.
+#
+# The runtime dependency list is requirements.txt and must stay minimal: every
+# package we do not install is attack surface we do not carry.
+#
+#   pip install -r requirements-dev.txt
+#
+# httpx2 - Starlette's TestClient needs an HTTP client. As of Starlette 1.7
+#          using the older `httpx` package emits a deprecation warning and the
+#          project now points at `httpx2`. Both audit clean, but only httpx2 is
+#          pinned here so the warning does not come back.
+#          `httpx` is also present in the local venv from an earlier install;
+#          it is not required by anything and can be removed.
+httpx2==2.13.1
+
+# Vulnerability scanning of the whole environment, run in CI on every push.
+pip-audit>=2.7

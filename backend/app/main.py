@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -8,7 +8,18 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import config
+from .auth_deps import (
+    enforce_route_protection,
+    get_current_user,
+    require_admin,
+)
+from .logging_redaction import install_redaction
 from .rate_limit import enforce_rate_limit
+from .tokens import Claims
+
+# Strip secrets out of anything logged, including uvicorn's access logs. Done
+# before the first line of this module is logged.
+install_redaction()
 
 logger = logging.getLogger("wfc.api")
 
@@ -73,7 +84,16 @@ async def validation_handler(request: Request, exc: RequestValidationError):
 
 @app.exception_handler(StarletteHTTPException)
 async def http_handler(request: Request, exc: StarletteHTTPException):
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    # Preserve headers carried on the exception. FastAPI's built-in handler does
+    # this and a hand-rolled one silently does not. The first symptom found by
+    # the test suite: the WWW-Authenticate: Bearer challenge disappeared from
+    # every 401, so a client had no way to learn it should send a token. Any
+    # other HTTPException(headers=...) - Retry-After, Location - would have been
+    # dropped the same way.
+    for key, value in (getattr(exc, "headers", None) or {}).items():
+        response.headers[key] = value
+    return response
 
 
 @app.exception_handler(Exception)
@@ -87,3 +107,39 @@ async def unhandled_handler(request: Request, exc: Exception):
 @app.get("/health")
 def health():
     return {"status": "ok", "brand": "WFC"}
+
+
+# --- Authenticated route stubs -------------------------------------------------
+# These exist to prove the token and role layer is wired end to end. They return
+# only what the token already carries and read no database, because there is no
+# database yet. When real routes are added they must carry the same dependencies.
+#
+# These are `async def` on purpose. FastAPI runs a sync `def` endpoint in a
+# threadpool, which measured 241 us per request more than `async def` on this
+# machine. The work here is ~55 us of token verification and nothing that
+# blocks, so there is no reason to pay for a thread hop. The rule for the
+# codebase: `async def` for endpoints that only validate and do crypto, plain
+# `def` for endpoints that do blocking I/O (database, HTTP calls), because an
+# `async def` that blocks will stall every other request on the event loop.
+
+
+@app.get("/me")
+async def me(claims: Claims = Depends(get_current_user)):
+    """Who the presented token says you are."""
+    return {
+        "user_id": claims.user_id,
+        "role": claims.role,
+        "expires_at": claims.expires_at.isoformat(),
+    }
+
+
+@app.get("/admin/ping")
+async def admin_ping(claims: Claims = Depends(require_admin)):
+    """Proves role enforcement: staff and customers must be refused here."""
+    return {"ok": True, "role": claims.role}
+
+
+# Refuse to import at all if any route above is reachable without a token.
+# This runs on every startup and in CI, so forgetting auth on a new endpoint is
+# a crash on the developer's machine rather than a hole in production.
+enforce_route_protection(app)

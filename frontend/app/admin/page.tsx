@@ -1,10 +1,11 @@
 "use client";
 import { useEffect, useState } from "react";
 import { MENU } from "@/lib/menu";
+import MockGate from "@/components/MockGate";
 
 type Order = { token: string; cart: Record<string, number>; mode: string; pay: string; phone: string; total: number; at: string };
 
-export default function AdminPage() {
+function AdminInner() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [off, setOff] = useState<Record<string, boolean>>({});
   useEffect(() => {
@@ -35,4 +36,8 @@ export default function AdminPage() {
       </main>
     </div>
   );
+}
+
+export default function AdminPage() {
+  return <MockGate area="Admin"><AdminInner /></MockGate>;
 }

@@ -1,8 +1,9 @@
 "use client";
 import { useEffect, useState } from "react";
+import MockGate from "@/components/MockGate";
 type Order = { token: string; mode: string; pay: string; total: number; phone: string; at: string };
 const FLOW = ["Placed", "Preparing", "Ready", "Completed"];
-export default function StaffPage() {
+function StaffInner() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [st, setSt] = useState<Record<string, string>>({});
   useEffect(() => {
@@ -25,4 +26,8 @@ export default function StaffPage() {
       </main>
     </div>
   );
+}
+
+export default function StaffPage() {
+  return <MockGate area="Staff"><StaffInner /></MockGate>;
 }

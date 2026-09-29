@@ -22,19 +22,19 @@ export default function CartPage() {
           <>
             <ul className="divide-y divide-zinc-800 rounded border border-zinc-800">
               {Object.entries(cart).map(([id, q]) => (
-                <li key={id} className="flex items-center justify-between px-3 py-2">
+                <li key={id} className="flex flex-col gap-2 px-3 py-3 text-sm sm:flex-row sm:items-center sm:justify-between sm:text-base">
                   <span>{nameOf(id)} — ₹{priceOf(id)}</span>
-                  <span className="flex items-center gap-2">
-                    <button onClick={() => setQty(id, q - 1)} className="rounded bg-zinc-800 px-2">-</button>
+                  <span className="flex items-center gap-3">
+                    <button onClick={() => setQty(id, q - 1)} className="min-h-11 min-w-11 rounded bg-zinc-800 px-3 py-2">-</button>
                     <span>{q}</span>
-                    <button onClick={() => setQty(id, q + 1)} className="rounded bg-zinc-800 px-2">+</button>
+                    <button onClick={() => setQty(id, q + 1)} className="min-h-11 min-w-11 rounded bg-zinc-800 px-3 py-2">+</button>
                     <span className="w-16 text-right font-bold">₹{priceOf(id) * q}</span>
                   </span>
                 </li>
               ))}
             </ul>
             <p className="mt-4 text-right font-bold">Total ₹{total} (no fees)</p>
-            <Link href="/checkout" className="mt-4 block rounded bg-[#ffb703] px-4 py-2 text-center font-bold text-black">Go to Checkout (mock)</Link>
+            <Link href="/checkout" className="mt-4 block min-h-11 rounded bg-[#ffb703] px-4 py-3 text-center font-bold text-black">Go to Checkout (mock)</Link>
           </>
         )}
       </main>

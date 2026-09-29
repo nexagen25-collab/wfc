@@ -41,6 +41,11 @@ jobs:
       - name: Upload + OTP abuse tests
         run: python -m tests.test_uploads_otp
 
+      - name: Pricing and menu-drift tests
+        # Also parses frontend/lib/menu.ts, so a price edited in one place but
+        # not the other fails the build.
+        run: python -m tests.test_pricing
+
       - name: Import check
         run: python -c "import app.main"
 

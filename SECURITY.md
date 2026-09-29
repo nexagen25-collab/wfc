@@ -29,6 +29,10 @@ protected, what is **not**, and what must happen before real money is involved.
 | Pixel-bomb and size limits read from the header, fail closed | `backend/app/uploads.py` | 40000x40000 and 6 MB rejected |
 | Path traversal, null bytes, unicode RTL overrides neutralised | `backend/app/uploads.py` | filename attack tests |
 | No XSS sinks in frontend source | `frontend/` | `dangerouslySetInnerHTML`/`eval`/`innerHTML` scan |
+| Server-side pricing, clients cannot send price/total/discount/role | `backend/app/schemas.py`, `backend/app/pricing.py` | 88/88 pricing + tamper tests |
+| Integer-only money, no floats, discount can never exceed subtotal | `backend/app/pricing.py` | 200% and 1000% coupon clamp tests |
+| Sold-out items cannot be ordered | `backend/app/menu.py` | 88/88 pricing tests |
+| Backend and frontend menus cannot drift apart in price | `backend/app/menu.py` | `test_pricing` parses `menu.ts` and diffs 36/36 |
 | Admin and Staff mocks fail closed in production builds | `frontend/components/MockGate.tsx` | production build HTML |
 | No secrets in git | `.gitignore` | tracked-file scan |
 | Known dependency CVEs | both | `npm audit` 0, `pip-audit` none |
@@ -40,6 +44,7 @@ cd backend
 .\.venv\Scripts\python.exe -m tests.test_security
 .\.venv\Scripts\python.exe -m tests.test_crypto
 .\.venv\Scripts\python.exe -m tests.test_uploads_otp
+.\.venv\Scripts\python.exe -m tests.test_pricing
 ```
 
 They also run automatically on every push via `.github/workflows/security.yml`,
@@ -61,16 +66,20 @@ along with the dependency audits and two guardrail assertions.
    restart and are **not shared between workers**, so on more than one instance
    the lockout can be side-stepped by spreading guesses across workers. It must
    move to the database or Redis before this scales. Written up in `app/otp.py`.
-6. **No upload route exists yet.** `app/uploads.py` validates bytes correctly,
+6. **The menu is duplicated in two places.** `backend/app/menu.py` and
+   `frontend/lib/menu.ts` must agree, and `test_pricing` enforces that. It is a
+   safety net, not a design: the database becomes the single source of truth.
+   A test is not a substitute for one source of truth.
+7. **No upload route exists yet.** `app/uploads.py` validates bytes correctly,
    but nothing calls it, and the owner still has to supply 36 menu photos.
    WebP is refused rather than half-validated.
-7. **No secret rotation.** `.env` values are assumed good on day one.
-8. **Rate limiting is per-process.** It resets on restart and does not share
+8. **No secret rotation.** `.env` values are assumed good on day one.
+9. **Rate limiting is per-process.** It resets on restart and does not share
    counts across instances. Fine for one server, wrong for more.
-9. **CSP allows `'unsafe-inline'` for scripts**, required by the Next.js runtime.
-   This weakens the policy and is a known limitation.
-10. **No HTTPS locally, no penetration test, no security logging or alerting.**
-11. **Input validation is not a substitute for authorisation.**
+10. **CSP allows `'unsafe-inline'` for scripts**, required by the Next.js runtime.
+    This weakens the policy and is a known limitation.
+11. **No HTTPS locally, no penetration test, no security logging or alerting.**
+12. **Input validation is not a substitute for authorisation.**
 
 ## Threat model — who attacks this and how
 
@@ -95,6 +104,8 @@ Rotate it in Railway before that database is connected to anything.
 ## Rules for this codebase
 
 1. Never trust a client-supplied price, total, discount, role, or user id.
+   `price_cart()` takes product ids and quantities and nothing else. If you ever
+   add a price argument to it, you have removed the shop's entire defence.
 2. Validate every input with a schema in `app/schemas.py`, never ad hoc.
 3. Never put a secret in frontend code. Only `NEXT_PUBLIC_*` may reach a browser,
    and the Razorpay *key id* is the only one of those that is safe.

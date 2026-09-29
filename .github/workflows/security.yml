@@ -38,6 +38,9 @@ jobs:
         # scrypt is deliberately slow; give it room on a cold runner.
         run: python -m tests.test_crypto
 
+      - name: Upload + OTP abuse tests
+        run: python -m tests.test_uploads_otp
+
       - name: Import check
         run: python -c "import app.main"
 

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { MENU } from "@/lib/menu";
 import ProductCard from "@/components/ProductCard";
+import SkeletonCards from "@/components/SkeletonCards";
 
 type Cart = Record<string, number>;
 const all = MENU.flatMap((c) => c.items);
@@ -13,11 +14,15 @@ export default function Home() {
   const [cart, setCart] = useState<Cart>({});
   const [q, setQ] = useState("");
   const [active, setActive] = useState(MENU[0].slug);
+  const [sheet, setSheet] = useState(false);
+  const [loading, setLoading] = useState(true);
   const railRef = useRef<HTMLDivElement>(null);
   const secRefs = useRef<Record<string, HTMLElement | null>>({});
 
   useEffect(() => {
     try { setCart(JSON.parse(localStorage.getItem("wfc-cart") ?? "{}")); } catch { /* mock only */ }
+    const t = setTimeout(() => setLoading(false), 450);
+    return () => clearTimeout(t);
   }, []);
   useEffect(() => { localStorage.setItem("wfc-cart", JSON.stringify(cart)); }, [cart]);
 
@@ -34,6 +39,8 @@ export default function Home() {
     setActive(slug);
     secRefs.current[slug]?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
+
+  const setQty = (id: string, v: number) => setCart((c) => { const n = { ...c }; if (v <= 0) delete n[id]; else n[id] = v; return n; });
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] pb-24 text-white">
@@ -73,6 +80,10 @@ export default function Home() {
       )}
 
       <main className="mx-auto max-w-6xl px-4 pt-4">
+        {loading ? (
+          <div className="mt-8"><SkeletonCards n={5} /></div>
+        ) : (
+          <>
         {query && shown.length === 0 && (
           <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-950 p-8 text-center">
             <p className="font-bold">No matches for “{q}”</p>
@@ -103,6 +114,8 @@ export default function Home() {
             <p className="mt-2 font-bold">Total = ₹{total} (sum×qty − discount, zero fees per D011)</p>
           </div>
         )}
+          </>
+        )}
       </main>
 
       {/* STICKY CART BAR */}
@@ -113,7 +126,43 @@ export default function Home() {
               <p className="font-bold">{count} item{count > 1 ? "s" : ""}</p>
               <p className="text-[#ffb703]">₹{total}</p>
             </div>
-            <Link href="/cart" className="min-h-11 rounded-lg bg-[#c1121f] px-5 py-2 font-bold">View cart →</Link>
+            <div className="flex gap-2">
+              <button onClick={() => setSheet(true)} className="min-h-11 rounded-lg border border-[#ffb703] px-4 py-2 font-bold text-[#ffb703]">Quick view</button>
+              <Link href="/cart" className="min-h-11 rounded-lg bg-[#c1121f] px-5 py-2 font-bold">View cart →</Link>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CART BOTTOM SHEET */}
+      {sheet && count > 0 && (
+        <div className="fixed inset-0 z-40 flex items-end" role="dialog" aria-label="Cart">
+          <button aria-label="Close cart" onClick={() => setSheet(false)} className="absolute inset-0 bg-black/70" />
+          <div className="relative max-h-[80vh] w-full overflow-y-auto rounded-t-2xl border-t border-zinc-800 bg-zinc-950 p-4 sm:mx-auto sm:max-w-lg sm:rounded-2xl sm:border">
+            <div className="mx-auto mb-3 h-1 w-10 rounded bg-zinc-700 sm:hidden" />
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-black">Your Cart</h2>
+              <button onClick={() => setSheet(false)} className="min-h-11 px-3 text-sm text-zinc-400">Close</button>
+            </div>
+            <ul className="mt-2 divide-y divide-zinc-800">
+              {Object.entries(cart).map(([id, v]) => (
+                <li key={id} className="flex items-center justify-between gap-3 py-2">
+                  <span className="min-w-0 flex-1 truncate text-sm">{nameOf(id)} <span className="text-zinc-500">₹{priceOf(id)}</span></span>
+                  <span className="flex items-center gap-2">
+                    <button onClick={() => setQty(id, v - 1)} className="min-h-11 min-w-11 rounded bg-zinc-800">−</button>
+                    <span className="w-6 text-center">{v}</span>
+                    <button onClick={() => setQty(id, v + 1)} className="min-h-11 min-w-11 rounded bg-zinc-800">+</button>
+                  </span>
+                  <span className="w-16 text-right text-sm font-bold">₹{priceOf(id) * v}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="mt-3 flex items-center justify-between border-t border-zinc-800 pt-3">
+              <span className="font-bold">Total</span>
+              <span className="text-lg font-black text-[#ffb703]">₹{total}</span>
+            </div>
+            <p className="mt-1 text-[11px] text-zinc-500">No fees, no delivery charge within 3km (D011, D014). Coupon applies at checkout.</p>
+            <Link href="/checkout" className="mt-3 block min-h-11 rounded-lg bg-[#ffb703] py-2 text-center font-black text-black">Checkout ₹{total}</Link>
           </div>
         </div>
       )}

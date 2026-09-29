@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { MENU } from "@/lib/menu";
+import ProductCard from "@/components/ProductCard";
 
 type Cart = Record<string, number>;
 const priceOf = (id: string) => MENU.flatMap((c) => c.items).find((i) => i.id === id)?.price ?? 0;
@@ -31,17 +32,11 @@ export default function Home() {
         {shown.map((cat) => (
           <section key={cat.slug} className="mt-8">
             <h2 className="inline-block rounded bg-[#ffb703] px-3 py-1 font-extrabold text-black uppercase">{cat.name}</h2>
-            <ul className="mt-3 divide-y divide-zinc-800 rounded border border-zinc-800">
+            <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
               {cat.items.map((it) => (
-                <li key={it.id} className="flex flex-col gap-2 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:py-2">
-                  <span className="text-sm sm:text-base">{it.name}</span>
-                  <span className="flex items-center justify-between gap-3 sm:justify-end">
-                    <span className="font-bold">₹{it.price}</span>
-                    <button onClick={() => add(it.id)} className="min-h-11 rounded bg-[#c1121f] px-4 py-2 text-sm font-bold">Add {cart[it.id] ? `(${cart[it.id]})` : ""}</button>
-                  </span>
-                </li>
+                <ProductCard key={it.id} id={it.id} name={it.name} price={it.price} count={cart[it.id] ?? 0} onAdd={() => add(it.id)} />
               ))}
-            </ul>
+            </div>
           </section>
         ))}
         {count > 0 && (

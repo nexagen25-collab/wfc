@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { MENU } from "@/lib/menu";
+import { discountFor } from "@/lib/coupons";
 
 type Cart = Record<string, number>;
 const all = MENU.flatMap((c) => c.items);
@@ -12,9 +13,12 @@ export default function CheckoutPage() {
   const [mode, setMode] = useState<"dinein" | "pickup" | "delivery">("pickup");
   const [pay, setPay] = useState<"COD" | "Razorpay">("COD");
   const [phone, setPhone] = useState("");
+  const [code, setCode] = useState("");
   const [token, setToken] = useState("");
   useEffect(() => { try { setCart(JSON.parse(localStorage.getItem("wfc-cart") ?? "{}")); } catch {} }, []);
-  const total = Object.entries(cart).reduce((s, [id, q]) => s + priceOf(id) * q, 0);
+  const subtotal = Object.entries(cart).reduce((s, [id, q]) => s + priceOf(id) * q, 0);
+  const discount = discountFor(code, subtotal);
+  const total = subtotal - discount;
   const place = () => {
     const t = "WFC" + Math.floor(1000 + Math.random() * 9000);
     setToken(t);
@@ -33,7 +37,8 @@ export default function CheckoutPage() {
         <div><p className="font-bold">Service mode</p>{(["dinein","pickup","delivery"] as const).map((m) => <label key={m} className="mr-3 text-sm"><input type="radio" checked={mode===m} onChange={()=>setMode(m)} /> {m}{m==="delivery" ? " (free 3km mock)" : ""}</label>)}</div>
         <div><p className="font-bold">Payment</p>{(["COD","Razorpay"] as const).map((p) => <label key={p} className="mr-3 text-sm"><input type="radio" checked={pay===p} onChange={()=>setPay(p)} /> {p}{p==="Razorpay" ? " (mock, no charge)" : " (pay at counter)"}</label>)}</div>
         <div><p className="font-bold">Phone (mock, no OTP yet)</p><input value={phone} onChange={(e)=>setPhone(e.target.value)} placeholder="98XXXXXXXX" className="mt-1 w-full rounded bg-zinc-900 px-3 py-2" /></div>
-        <p className="font-bold">Total ₹{total}</p>
+        <div><p className="font-bold">Coupon (mock: WFC10 = 10% off min ₹199)</p><input value={code} onChange={(e)=>setCode(e.target.value)} placeholder="WFC10" className="mt-1 w-full rounded bg-zinc-900 px-3 py-2" />{code ? <p className="text-sm text-[#ffb703]">{discount > 0 ? `Applied −₹${discount}` : "Invalid / below min"}</p> : null}</div>
+        <p className="font-bold">Subtotal ₹{subtotal} − Discount ₹{discount} = Total ₹{total}</p>
         <button onClick={place} disabled={total===0} className="w-full rounded bg-[#ffb703] py-2 font-bold text-black disabled:opacity-40">Place mock order</button>
       </main>
     </div>

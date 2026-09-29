@@ -203,8 +203,18 @@ ok("useful debugging data still reaches the log",
 rec = logging.LogRecord("x", logging.INFO, __file__, 1, "jwt %s", ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig",), None)
 RedactingFilter().filter(rec)
 gone("RedactingFilter scrubs message and args", rec.getMessage(), ["eyJhbGciOiJIUzI1NiJ9"])
-ok("RedactingFilter clears args so nothing re-expands",
-   rec.args == () and "%s" not in rec.getMessage())
+# This assertion used to be `rec.args == ()`. That was the bug, not the intent:
+# emptying args destroyed the five values uvicorn's AccessFormatter unpacks, and
+# every access log line in the app was silently discarded. The invariant worth
+# protecting is the one below -- the secret must not survive anywhere in the
+# record -- not the particular mechanism used to achieve it.
+ok("no secret survives anywhere in the record, so nothing re-expands",
+   "eyJhbGciOiJIUzI1NiJ9" not in rec.getMessage()
+   and "eyJhbGciOiJIUzI1NiJ9" not in str(rec.args)
+   and "%s" not in rec.getMessage(),
+   f"args={rec.args!r} msg={rec.getMessage()!r}")
+ok("the args tuple is left the right length for downstream formatters",
+   len(rec.args) == 1, f"got {len(rec.args)}")
 
 bad_fmt = logging.Formatter()
 rec2 = logging.LogRecord("x", logging.INFO, __file__, 1, "safe message", (), None)
@@ -417,6 +427,144 @@ plain = asyncio.run(
 )
 ok("an exception with no headers does not break the handler",
    plain.status_code == 404 and plain.headers.get("retry-after") is None)
+
+
+# ---------------------------------------------------------------------------
+# REGRESSION: redaction must not break uvicorn's access log.
+#
+# This block exists because the bug it guards against was shipped once already.
+# Redacting a record by collapsing it to a string and emptying record.args
+# destroyed the exact five values uvicorn's AccessFormatter unpacks, so every
+# single access log line raised "not enough values to unpack" and was discarded.
+# All 114 tests still passed, because they fed the filter synthetic records
+# whose args nobody else was reading. Nothing in the suite ever handed a real
+# access-log record to a real AccessFormatter.
+#
+# The access log is the record of who called what. It is the first thing anyone
+# wants when a rate limit trips or a token is forged, so a security control that
+# silently disables it is worse than no control.
+# ---------------------------------------------------------------------------
+from uvicorn.logging import AccessFormatter  # noqa: E402
+
+ACCESS_FMT = '%(client_addr)s - "%(request_line)s" %(status_code)s'
+
+
+def access_record(path="/api/orders?token=SECRET123", status=200):
+    """A LogRecord shaped exactly the way uvicorn's AccessLogger emits one."""
+    r = logging.LogRecord(
+        "uvicorn.access", logging.INFO, "", 0,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:5000", "GET", path, "1.1", status),
+        None,
+    )
+    r.client_addr = "127.0.0.1:5000"
+    r.method = "GET"
+    r.full_path = path
+    r.http_version = "1.1"
+    r.status_code = status
+    return r
+
+
+# Without the filter, uvicorn can format it. That is the control: it proves the
+# failure below comes from redaction and not from how the record was built.
+_r = access_record()
+try:
+    _out = AccessFormatter(ACCESS_FMT).format(_r)
+    ok("uvicorn formats an access record with no filter attached", "200 OK" in _out, _out)
+except Exception as _exc:  # noqa: BLE001
+    ok("uvicorn formats an access record with no filter attached", False, repr(_exc))
+
+_r = access_record()
+RedactingFilter().filter(_r)
+ok("the filter leaves five args for AccessFormatter to unpack",
+   len(_r.args) == 5, f"got {len(_r.args)}: {_r.args!r}")
+try:
+    _out = AccessFormatter(ACCESS_FMT).format(_r)
+    ok("a filtered access record still formats (THE regression)", True, _out.strip())
+except Exception as _exc:  # noqa: BLE001
+    ok("a filtered access record still formats (THE regression)", False, repr(_exc))
+    _out = ""
+ok("the access line still names the client", "127.0.0.1:5000" in _out, _out)
+ok("the access line still shows the status", "200" in _out, _out)
+ok("a token in the access query string is redacted", "SECRET123" not in _out, _out)
+ok("the redaction is visible rather than silent", "REDACTED" in _out, _out)
+
+_r = access_record(status=503)
+RedactingFilter().filter(_r)
+ok("the status code stays an int, not a string",
+   isinstance(_r.args[4], int) and _r.args[4] == 503,
+   f"{type(_r.args[4]).__name__} {_r.args[4]!r}")
+ok("non-secret string args are untouched",
+   _r.args[0] == "127.0.0.1:5000" and _r.args[3] == "1.1")
+
+
+class _Opaque:
+    pass
+
+
+_sentinel = _Opaque()
+_r = logging.LogRecord("x", logging.INFO, "", 0, "obj %s", (_sentinel,), None)
+RedactingFilter().filter(_r)
+ok("an opaque object arg is passed through unchanged", _r.args[0] is _sentinel)
+
+_r = logging.LogRecord("x", logging.INFO, "", 0, "d %s", ({"password": "hunter2"},), None)
+RedactingFilter().filter(_r)
+# logging collapses a single mapping arg to the mapping itself, not a 1-tuple.
+ok("a dict arg is scrubbed by KEY, not just by value",
+   isinstance(_r.args, dict) and _r.args.get("password") == "[REDACTED]", str(_r.args))
+ok("a non-secret dict key keeps its value",
+   logging.LogRecord("x", logging.INFO, "", 0, "d %s", ({"user_id": "u-7"},), None)
+   and (lambda r: (RedactingFilter().filter(r), r.args.get("user_id") == "u-7")[1])(
+       logging.LogRecord("x", logging.INFO, "", 0, "d %s", ({"user_id": "u-7"},), None)))
+_r = logging.LogRecord("x", logging.INFO, "", 0, "d %s", ({"token_count": 3},), None)
+RedactingFilter().filter(_r)
+ok("token_count is not mistaken for a token", _r.args.get("token_count") == 3, str(_r.args))
+_r = logging.LogRecord("x", logging.INFO, "", 0, "d %s", ({"session_id": "s-1"},), None)
+RedactingFilter().filter(_r)
+ok("session_id is not mistaken for a session", _r.args.get("session_id") == "s-1", str(_r.args))
+_r = logging.LogRecord("x", logging.INFO, "", 0, "d %s", ({"order_total": 5610},), None)
+RedactingFilter().filter(_r)
+ok("useful numbers survive redaction", _r.args.get("order_total") == 5610, str(_r.args))
+
+_r = logging.LogRecord("x", logging.INFO, "", 0, "t %s", (("a", "password=b"),), None)
+RedactingFilter().filter(_r)
+ok("a tuple arg keeps its shape and is scrubbed",
+   isinstance(_r.args[0], tuple) and "REDACTED" in _r.args[0][1], str(_r.args))
+
+# With args present, msg is a printf template. Redacting it would eat the '%s'
+# and break substitution -- a second, quieter way to lose a log line.
+_r = logging.LogRecord("x", logging.INFO, "", 0, "token=%s for %s", ("abc123", "user"), None)
+RedactingFilter().filter(_r)
+ok("a printf template keeps both placeholders", _r.msg.count("%s") == 2, repr(_r.msg))
+try:
+    _msg = _r.getMessage()
+    ok("substitution still works after filtering", "abc123" in _msg and "user" in _msg, _msg)
+except Exception as _exc:  # noqa: BLE001
+    ok("substitution still works after filtering", False, repr(_exc))
+
+_r = logging.LogRecord("x", logging.INFO, "", 0, "no args here", (), None)
+RedactingFilter().filter(_r)
+ok("with no args the message itself is redacted",
+   isinstance(_r.msg, str) and _r.getMessage() == "no args here")
+
+_wrapper = RedactingFormatter(AccessFormatter(ACCESS_FMT))
+_out = _wrapper.format(access_record())
+ok("the wrapper delegates to uvicorn's formatter, not a plain one",
+   "200 OK" in _out and "127.0.0.1:5000" in _out, _out)
+ok("the wrapper keeps uvicorn's access format", '"GET' in _out, _out)
+_out = RedactingFormatter().format(access_record())
+ok("the wrapper also works with nothing to wrap", "REDACTED" in _out, _out)
+
+
+class _Hostile:
+    def __str__(self):
+        raise RuntimeError("refuses to be a string")
+
+
+_r = logging.LogRecord("x", logging.INFO, "", 0, "msg %s", (_Hostile(),), None)
+ok("a filter that would raise still returns True, so the line is emitted",
+   RedactingFilter().filter(_r) is True)
+ok("the record is left usable rather than half-mutated", _r.args is not None)
 
 
 print("=" * 88)

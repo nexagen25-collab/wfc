@@ -114,6 +114,13 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (_KEY_VALUE, r"\1" + REDACTED),
 ]
 
+# The same key names, matched as a bare identifier with no separator required.
+# Used only to decide whether a dict KEY marks its value as a secret, where the
+# rendered form is `{'password': 'hunter2'}` and the separator is already
+# there. The trailing \b keeps `token_count` and `session_id` out: an
+# underscore is a word character, so those do not match `token` or `session`.
+_KEY_NAME_ONLY = re.compile(r"(?i)\b(?:" + "|".join(_KEY_NAMES) + r")\b")
+
 
 def redact(value: object) -> str:
     """Return `value` as a string with recognised secrets replaced.
@@ -131,6 +138,36 @@ def redact(value: object) -> str:
     return text
 
 
+def _scrub(value: object) -> object:
+    """Redact a log argument while preserving its type.
+
+    Types are load-bearing here. uvicorn's AccessFormatter calls
+    _get_status_code() on the status code, which compares an int against a
+    range; handing it the string "200" turns every access log line into a
+    TypeError. So only strings are rewritten, and containers are walked
+    without flattening. Numbers, booleans and None are returned untouched
+    because none of them can be a secret.
+
+    A mapping is handled by key as well as by value. `{"password": "hunter2"}`
+    formats to `{'password': 'hunter2'}`, and it is the KEY that marks the value
+    as a secret: the bare string "hunter2" matches no pattern on its own. An
+    earlier version scrubbed only the values, so that dict reached the log
+    intact. Found by this file's own tests.
+    """
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {
+            k: (REDACTED if isinstance(k, str) and _KEY_NAME_ONLY.search(k) else _scrub(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(_scrub(v) for v in value)
+    if isinstance(value, list):
+        return [_scrub(v) for v in value]
+    return value
+
+
 class RedactingFilter(logging.Filter):
     """A handler or logger filter that scrubs a record before it is formatted.
 
@@ -138,15 +175,32 @@ class RedactingFilter(logging.Filter):
     applied to records that propagate up from child loggers, but a filter on a
     *handler* is applied to every record that handler emits. uvicorn's access
     and error logs are the ones most likely to carry a token in a query string.
+
+    The arguments are scrubbed in place and the structure is preserved. An
+    earlier version collapsed each record to a single string and emptied
+    `record.args`, which silently broke uvicorn's AccessFormatter: it unpacks
+    exactly five values from `record.args`, so every access log line raised
+    "not enough values to unpack" and was lost. The access log is the one place
+    that records who called what, which is the first thing anyone wants when a
+    rate limit trips. Redaction must never be the reason a line disappears.
+
+    For the same reason `record.msg` is only rewritten when there are no
+    arguments. With arguments it is a printf template like 'token=%s', and
+    redacting it would consume the '%s' and break the substitution.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            message = record.getMessage()
-        except Exception:  # noqa: BLE001 - broken args must not break logging
-            message = str(record.msg)
-        record.msg = redact(message)
-        record.args = ()
+            if record.args:
+                record.args = _scrub(record.args)
+            else:
+                record.msg = redact(record.msg)
+        except Exception:  # noqa: BLE001 - redaction must never lose a log line
+            # Deliberately swallowed. A filter that raises stops the handler
+            # emitting the record at all, so a bug here would be an outage of
+            # the logs. The line goes out unredacted instead, which is bad but
+            # recoverable; a silently missing line is neither.
+            pass
 
         # Exception text is formatted later, by whichever formatter the handler
         # has. Set exc_text here so a plain logging.Formatter still gets a
@@ -160,14 +214,28 @@ class RedactingFilter(logging.Filter):
 
 
 class RedactingFormatter(logging.Formatter):
-    """Wraps any formatter and redacts the final string.
+    """Wraps another formatter and redacts the final rendered string.
 
-    Catches everything, including the parts of a record a filter cannot reach.
-    Useful when the app installs its own logging config.
+    Catches everything, including the parts of a record a filter cannot reach,
+    because it runs on the text that is actually about to be written.
+
+    It wraps rather than replaces, which is what makes it safe to install on
+    uvicorn's handlers. Swapping their formatter for a plain one would discard
+    the configured access_log_format and the "-" it prints for a missing client
+    address, quietly degrading every access log line in the app.
     """
+
+    def __init__(self, wrapped: logging.Formatter | None = None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._wrapped = wrapped
 
     def format(self, record: logging.LogRecord) -> str:
         return redact(super().format(record))
+
+    def formatMessage(self, record: logging.LogRecord) -> str:
+        if self._wrapped is not None:
+            return self._wrapped.formatMessage(record)
+        return super().formatMessage(record)
 
 
 _EXC_FORMATTER = logging.Formatter()
@@ -197,6 +265,11 @@ def install_redaction() -> int:
         if not any(isinstance(f, RedactingFilter) for f in handler.filters):
             handler.addFilter(RedactingFilter())
             touched += 1
+        # Second layer: scrub the rendered text as well. The filter handles the
+        # parts of a record it can reach; this handles whatever reaches the
+        # output by some route nobody anticipated.
+        if not isinstance(handler.formatter, RedactingFormatter):
+            handler.setFormatter(RedactingFormatter(handler.formatter))
 
     for logger in loggers:
         if not any(isinstance(f, RedactingFilter) for f in logger.filters):

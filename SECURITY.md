@@ -53,6 +53,7 @@ protected, what is **not**, and what must happen before real money is involved.
 | A strict limit cannot be loosened or disabled by an environment variable | `backend/app/rate_limit.py` | env 999999 clamped to 5; env 0 and -5 clamped to 1 |
 | Concurrent password hashing capped; over-capacity refused, never queued | `backend/app/rate_limit.py` | 24 threads, peak held at 4/4, 13307 refusals |
 | An `/auth/` route with no strict limit stops the app from starting | `backend/app/auth_deps.py` | startup check fires on `/auth/refresh`, proven able to fail |
+| The access log survives redaction, and secrets in it are scrubbed | `backend/app/logging_redaction.py` | real `AccessFormatter` + real access record, 139/139 |
 
 Run all seven attack suites:
 
@@ -123,9 +124,25 @@ along with the dependency audits and two guardrail assertions.
     `:` or `=` after it is not caught (`api-key ABC123` in bare prose), a secret
     split across two log lines is not caught, and it is O(log line length) at
     ~420 us/KB. It is a safety net behind rule 8, not a replacement for it.
+
+    It is also a filter over a `LogRecord`, and that record belongs to
+    whatever formatter the handler already had. An earlier version collapsed
+    each record to a single string and emptied `record.args`. uvicorn's
+    `AccessFormatter` unpacks exactly five values from `record.args`, so
+    **every access log line in the app raised and was discarded** — the control
+    silently disabled the log that records who called what, which is the first
+    thing you want when a rate limit trips. All 114 tests passed, because none
+    of them handed a real access record to a real `AccessFormatter`.
+
+    Two rules follow, and they are about tests as much as about code:
+    **never mutate a record's `args` into a different shape or length**, and
+    **test a logging control against the real formatter, not a synthetic one.**
+    `RedactingFilter` now scrubs arguments in place while preserving their
+    types, and `RedactingFormatter` wraps the existing formatter rather than
+    replacing it, so uvicorn's access format and status reason survive.
+
 16. **No HTTPS locally, no penetration test, no security logging or alerting.**
 17. **Input validation is not a substitute for authorisation.**
-
 ## Threat model — who attacks this and how
 
 | Attacker | Goal | Main risk today | Control that must exist |
@@ -248,8 +265,13 @@ believing it, and lift the limit for the run.
 13. Do not log request bodies, payloads or long database error strings. Redaction
     is O(size) at ~420 us/KB and would become the most expensive part of a
     request.
-14. **Wrap every password hash in `PASSWORD_HASH_GUARD.slot()`.** It refuses
+14. **Never change a `LogRecord`'s `args` shape or length.** Redact the
+    arguments in place, and let the handler's own formatter render them.
+    Emptying `args` is how every uvicorn access log line got silently dropped.
+    If you touch `logging_redaction.py`, test against a real `AccessFormatter`
+    and a real access record — a synthetic record will not catch this.
+15. **Wrap every password hash in `PASSWORD_HASH_GUARD.slot()`.** It refuses
     immediately when the process is already at capacity; do not add a queue or
     a retry loop around it.
-15. Re-run the seven attack suites and `npm audit` / `pip-audit` before every
+16. Re-run the seven attack suites and `npm audit` / `pip-audit` before every
     release. They are in CI, but CI is not a substitute for reading them.
